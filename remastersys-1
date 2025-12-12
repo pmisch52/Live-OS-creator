@@ -1,0 +1,256 @@
+#!/bin/bash
+
+###################################################################
+#  REMASTERSYS  
+# Under the GNU GPL2 License   
+# Copyright (C) 2021-2023 Daniel "Nerun" Rodrigues 
+# Copyright (C) 2007-2013 Tony "Fragadelic" Brijeski   
+# Full copyright notice: /usr/share/doc/remastersys/copyright  
+# - modified and adapted to LIVE scripts: 
+# Copyright (C) 2025 Peter "opi" Misch  
+###################################################################
+
+if [ "$1" != 'allow' ]; then  
+  echo "Darf nur aus MAIN aufgerufen werden."
+  sleep 1
+  exit 1
+fi
+
+BASEWORKDIR="/home"
+WORKDIR="/home/remastersys"
+LIVEUSER="debian"
+LIVEUSER="$(echo $LIVEUSER | awk '{print tolower ($0)}')"
+LIVEUSER_FULL_NAME="$LIVEUSER session user"
+EXCLUDES=""
+SQUASHFSOPTS="-no-recovery -always-use-fragments -b 1M -comp gzip "
+#SQUASHFSOPTS="-comp xz -Xbcj x86 -b 1M -always-use-fragments"
+
+blue="\033[1;34m"
+purple="\033[1;35m"
+cyan="\033[1;36m"
+reset="\033[0m"
+
+# Remastersys terminal logo
+remastersyslogo(){
+#Clear screen
+clear
+vers=$"adapted to LiveOS: PM-2025"
+echo -e "$blue  ___ ___ __  __   _   ___ _____ ___ ___  _____   _____ \n \
+| _ \ __|  \/  | /_\ / __|_   _| __| _ \/ __\ \ / / __| \n \
+|   / _|| |\/| |/ _ \\\\\__ \ | | | _||   /\__ \\\\\ V /\__ \\ \n \
+|_|_\___|_|  |_/_/ \_\___/ |_| |___|_|_\|___/ |_| |___/ \n \
+ $vers $reset";
+}
+remastersyslogo
+echo ""
+echo " >> Creating the SFS for LiveOS << "
+
+log_msg() {
+    echo -e "$1" >> $WORKDIR/remastersys.log
+}
+
+# STEP 1 - Create the CD tree in $WORKDIR/ISOTMP
+echo ""
+echo "- Checking if the $WORKDIR folder has already been created."
+mkdir -p $WORKDIR
+mkdir -p $WORKDIR/ISOTMP
+mkdir -p $WORKDIR/ISOTMP/live
+#mkdir -p $WORKDIR/ISOTMP/install
+#mkdir -p $WORKDIR/ISOTMP/preseed
+mkdir -p $WORKDIR/dummysys
+mkdir -p $WORKDIR/dummysys/dev
+mkdir -p $WORKDIR/dummysys/etc/live
+mkdir -p $WORKDIR/dummysys/proc
+mkdir -p $WORKDIR/dummysys/tmp
+mkdir -p $WORKDIR/dummysys/sys
+mkdir -p $WORKDIR/dummysys/mnt
+mkdir -p $WORKDIR/dummysys/media
+mkdir -p $WORKDIR/dummysys/run
+mkdir -p $WORKDIR/dummysys/var
+chmod ug+rwx,o+rwt $WORKDIR/dummysys/tmp
+
+echo -e $"\n- Copying /var and /etc to temporary area and deleting extra files."
+
+if [ "$EXCLUDES" != "" ]; then
+    for addvar in $EXCLUDES ; do
+        VAREXCLUDES="$VAREXCLUDES --exclude='$addvar' "
+    done
+fi
+
+#cleanup leftover live script if it exists
+if [ -f /etc/profile.d/zz-live.sh ]; then
+    rm -f /etc/profile.d/zz-live.sh
+fi
+
+rsync --exclude='*.log.*' --exclude='*.pid' --exclude='*.bak' --exclude='*.[0-9].gz' --exclude='*.deb' $VAREXCLUDES-a /var/. $WORKDIR/dummysys/var/.
+rsync $VAREXCLUDES-a /etc/. $WORKDIR/dummysys/etc/.
+
+rm -f $WORKDIR/dummysys/etc/mtab
+rm -f $WORKDIR/dummysys/etc/fstab
+rm -f $WORKDIR/dummysys/etc/udev/rules.d/70-persistent*
+ls $WORKDIR/dummysys/var/lib/apt/lists | grep -v ".gpg" | grep -v "lock" | grep -v "partial" | grep -v "auxfiles" | xargs -i rm $WORKDIR/dummysys/var/lib/apt/lists/{} ;
+
+bootloader() {
+    # wird evtl. nicht benötigt 
+    # bootloader localization
+    local EnterOrTab=$"Press ENTER to choose or TAB to edit a menu entry"
+    local LiveCD=$"Live CD"
+    local LiveCDFailSafe=$"(fail safe)"
+    local ChainBoot=$"Boot from hard disk"
+    local MemTest=$"Memory Test (Memtest86)"
+    local MemTestPlus=$"Memory Test (Memtest86+)"
+
+    #BOOT Type selected is GRUB
+  
+    cp /etc/remastersys/isolinux/memtest86.bin $WORKDIR/ISOTMP/
+    cp /etc/remastersys/isolinux/memtest86+x64.bin $WORKDIR/ISOTMP/
+    mkdir -p $WORKDIR/ISOTMP/boot/grub
+    mkdir -p $WORKDIR/ISOTMP/usr/share/grub
+    cp -a /boot/grub/* $WORKDIR/ISOTMP/boot/grub/
+    cp -a /usr/share/grub/* $WORKDIR/ISOTMP/usr/share/grub/
+    cp /etc/remastersys/grub/grub.cfg $WORKDIR/ISOTMP/boot/grub/grub.cfg
+    cp /etc/remastersys/splash.png $WORKDIR/ISOTMP/boot/grub/grub.png
+
+    grubcfg="$WORKDIR/ISOTMP/boot/grub/grub.cfg"
+    langshort=$(locale | grep -w 'LANG' | cut -d= -f2 | cut -d. -f1) # pt_BR not pt_BR.UTF-8
+
+    # grub.cfg translation
+    sed -i -e 's/__LANGUAGE__/'"$langshort"'/g' "$grubcfg"
+    sed -i -e 's/__LIVECDLABEL__/'"$LIVECDLABEL"'/g' "$grubcfg"
+    sed -i -e 's/__LIVECDFAILSAFE__/'"$LIVECDLABEL $LiveCDFailSafe"'/g' "$grubcfg"
+    sed -i -e 's/__CHAINBOOT__/'"$ChainBoot"'/g' "$grubcfg"
+    sed -i -e 's/__MEMTEST__/'"$MemTest"'/g' "$grubcfg"
+    sed -i -e 's/__MEMTESTPLUS__/'"$MemTestPlus"'/g' "$grubcfg"
+
+    if [ ! -d /etc/plymouth ]; then
+        sed -i -e 's/splash//g' $WORKDIR/ISOTMP/boot/grub/grub.cfg
+    fi
+    sleep 1
+}
+
+# STEP 2 - Prepare live.conf ###########################################
+
+LIVEUSER="$(grep '^[^:]*:[^:]*:1000:' /etc/passwd | awk -F ":" '{ print $1 }')"
+LIVEUSER_FULL_NAME="$(getent passwd $LIVEUSER | cut -d ':' -f 5 | cut -d ',' -f 1)"
+
+if [ ! -d /etc/live ]; then
+    mkdir -p /etc/live
+fi
+
+echo "export LIVE_USERNAME=\"$LIVEUSER\"" > /etc/live/config.conf
+echo "export LIVE_USER_FULLNAME=\"$LIVEUSER_FULL_NAME\"" >> /etc/live/config.conf
+echo "export LIVE_HOSTNAME=\"$LIVEUSER\"" >> /etc/live/config.conf
+echo "export LIVE_USER_DEFAULT_GROUPS=\"audio,cdrom,dialout,floppy,video,plugdev,netdev,powerdev,adm,sudo\"" >> /etc/live/config.conf
+lang=$(locale | grep -w 'LANG' | cut -d= -f2) 
+echo "export LIVE_LOCALES=\"$lang\"" >> /etc/live/config.conf
+echo "export LIVE_TIMEZONE=Europe/Berlin" >> /etc/live/config.conf
+echo "export LIVE_NOCONFIGS=\"user-setup,sudo,locales,locales-all,tzdata,gdm,gdm3,kdm,lightdm,lxdm,nodm,slim,xinit,keyboard-configuration,gnome-panel-data,gnome-power-manager,gnome-screensaver,kde-services,debian-installer-launcher,login\"" >> /etc/live/config.conf
+
+cp /etc/live/config.conf $WORKDIR/dummysys/etc/live/
+
+sleep 1
+
+# /etc/initramfs.conf für LIVE erzeugen ################################
+
+echo -e $"\n- Setting up Live options (initramfs.conf). \n$purple"
+
+# alte .conf sichern:
+mv /etc/initramfs-tools/initramfs.conf  /etc/initramfs-tools/initramfs.bak 
+
+# neue .conf erstellen:
+
+cat > "/etc/initramfs-tools/initramfs.conf" <<EOF
+MODULES=most
+BUSYBOX=auto
+KEYMAP=n
+COMPRESS=zstd
+DEVICE=
+NFSROOT=auto
+RUNSIZE=10%
+FSTYPE=auto
+EOF
+# make a new initial ramdisk including the live scripts <-------------------
+update-initramfs -t -c -k $(uname -r)
+    
+# alte .conf wiederherstellen
+mv /etc/initramfs-tools/initramfs.bak  /etc/initramfs-tools/initramfs.conf
+
+echo -e $"\n$reset- Copying kernel and initrd."
+cp /boot/vmlinuz-$(uname -r) $WORKDIR/ISOTMP/live/vmlinuz
+#cp /boot/initrd.img-$(uname -r) $WORKDIR/ISOTMP/live/initrd.img
+
+# INITRD von der LIVE-CD  !!! 
+
+cp /boot/LIVE/initrd.img-$(uname -r) $WORKDIR/ISOTMP/live/initrd.img
+
+# STEP 3 - Make filesystem.squashfs ####################################
+
+if [ -f $WORKDIR/remastersys.log ]; then
+    rm -f $WORKDIR/remastersys.log
+    touch $WORKDIR/remastersys.log
+fi
+
+if [ -f $WORKDIR/ISOTMP/live/filesystem.squashfs ]; then
+    rm -f $WORKDIR/ISOTMP/live/filesystem.squashfs
+fi
+
+echo -e $"\n- Creating filesystem.squashfs. It will take a while, so be patient...\n"
+
+REALFOLDERS=""
+
+for d in $(ls -d $WORKDIR/dummysys/*); do
+    REALFOLDERS="$REALFOLDERS $d"
+done
+   
+for d in $(ls / | grep -v etc | grep -v run | grep -v tmp | grep -v sys | grep -v var \
+| grep -v dev | grep -v media | grep -v mnt | grep -v lost+found | grep -v proc); do
+    REALFOLDERS="$REALFOLDERS /$d"
+done
+
+mksquashfs $REALFOLDERS $WORKDIR/ISOTMP/live/filesystem.squashfs \
+-no-duplicates $SQUASHFSOPTS -e boot/grub $WORKDIR $EXCLUDES 2>>$WORKDIR/remastersys.log
+
+sleep 1
+
+stripe="------------------------------------------------------"
+log_msg "$stripe\nMount information:"
+mount >> $WORKDIR/remastersys.log
+log_msg "$stripe\ndf information:"
+df -h 2>&1 | grep -v "df:" >> $WORKDIR/remastersys.log
+#log_msg "$stripe\n/etc/remastersys.conf info:"
+#cat /etc/remastersys.conf >> $WORKDIR/remastersys.log
+log_msg "$stripe\n/etc/live/config.conf info:"
+cat /etc/live/config.conf >> $WORKDIR/remastersys.log
+log_msg "$stripe\n/etc/passwd info:"
+cat $WORKDIR/dummysys/etc/passwd >> $WORKDIR/remastersys.log
+log_msg "$stripe\n/etc/group info:"
+cat $WORKDIR/dummysys/etc/group >> $WORKDIR/remastersys.log
+log_msg "$stripe\n/etc/skel info:"
+find /etc/skel/ >> $WORKDIR/remastersys.log
+log_msg "$stripe\n/etc/X11/default-display-manager info:"
+cat /etc/X11/default-display-manager >> $WORKDIR/remastersys.log
+log_msg "$stripe\nVersion info: $VERSION"
+log_msg "$stripe\nCommand-line options: $@\n$stripe"
+
+sleep 1
+
+# checking SFS...
+if [ -f $WORKDIR/ISOTMP/live/filesystem.squashfs ]; then
+    echo -e "$reset $purple<< Squashfs erfolgreich erstellt >> $reset"
+    #echo " weiter mit <ENTER>..."
+else 
+    echo -e "$red SFS konnte nicht erstellt werden! $reset"
+    sleep 2
+    exit 1
+fi
+
+# checking the size of the compressed filesystem to ensure it meets the iso9660 spec for a single file
+
+SQUASHFSSIZE=`ls -s $WORKDIR/ISOTMP/live/filesystem.squashfs | awk -F " " '{print $1}'`
+echo -e "$blue  Grösse des sfs: $((SQUASHFSSIZE/1000)) MB"
+
+if [ "$SQUASHFSSIZE" -gt "3999999" ]; then
+    echo " The compressed filesystem is larger than the iso9660 specification allows for a single file. You must try to reduce the amount of data you are backing up and try again."
+    echo " The compressed filesystem is larger than the iso9660 specification allows for a single file. You must try to reduce the amount of data you are backing up and try again.">>$WORKDIR/remastersys.log
+fi
+exit 0
